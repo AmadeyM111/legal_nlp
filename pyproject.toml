@@ -1,0 +1,37 @@
+[project]
+name = "legal_nlp"
+version = "0.1.0"
+requires-python = ">=3.11,<3.13"
+description = "Legal RAG + LLM system"
+authors = [{name = "Anton Amadeus", email = "amadey1110@gmail.com"}]
+
+dependencies = [
+    "chromadb>=0.5",
+    "langchain>=0.3",
+    "langchain-community",
+    "langchain-huggingface",
+    "sentence-transformers",
+    "pydantic-settings",
+    "beautifulsoup4",
+    "playwright",
+    "streamlit>=1.38",
+    "ragas",
+    "transformers>=4.40",
+    "huggingface_hub",
+    "tqdm",
+    "torch>=2.3",                   
+    "playwright",                    
+]
+
+[project.optional-dependencies]
+dev = ["ruff", "black", "pytest"]
+
+[project.scripts]
+ingest = "scripts.rebuild_index:main"
+scrape = "scripts.scrape_all:main"
+app = "app.streamlit_app:main"
+eval = "scripts.evaluate:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
