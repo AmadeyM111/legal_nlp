@@ -27,6 +27,31 @@ def resolve_model_path(model_arg: str) -> str:
             f"Или укажи полное имя на HF: IlyaGusev/saiga_mistral_7b_lora"
         )
 
+# Автоопределение бэкенда и установка нужного
+def install_backend():
+    try:
+        import mlx
+        # Проверяем, есть ли safetensors файлы в модели
+        import os
+        model_path = resolve_model_path("saiga_mistral_7b_merged")
+        safetensors_files = [f for f in os.listdir(model_path) if f.endswith('.safetensors')]
+        if safetensors_files:
+            return "mlx"
+        else:
+            print("Формат safetensors не найден, используем PyTorch backend")
+            return "cuda"  # fallback на PyTorch если нет safetensors
+    except ImportError:
+        pass
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+        if torch.backends.mps.is_available():
+            return "mps"
+    except:
+        pass
+    return "cuda" # fallback
+
 # Set up logging first before any other processing
 parser = argparse.ArgumentParser()
 parser.add_argument("--data", type=Path, default=PROJECT_ROOT / "data" / "processed" / "synthetic_qa_cleaned.json")
@@ -54,31 +79,6 @@ logger = logging.getLogger(__name__)
 
 # Now we can safely use logger
 logger.info("Setting up fine-tuning script...")
-
-# Автоопределение бэкенда и установка нужного
-def install_backend():
-    try:
-        import mlx
-        # Проверяем, есть ли safetensors файлы в модели
-        import os
-        model_path = resolve_model_path("saiga_mistral_7b_merged")
-        safetensors_files = [f for f in os.listdir(model_path) if f.endswith('.safetensors')]
-        if safetensors_files:
-            return "mlx"
-        else:
-            print("Формат safetensors не найден, используем PyTorch backend")
-            return "cuda"  # fallback на PyTorch если нет safetensors
-    except ImportError:
-        pass
-    try:
-        import torch
-        if torch.cuda.is_available():
-            return "cuda"
-        if torch.backends.mps.is_available():
-            return "mps"
-    except:
-        pass
-    return "cuda" # fallback
 
 BACKEND = install_backend()
 logger.info(f"Backend detected: {BACKEND}")
@@ -188,7 +188,7 @@ def finetune(args):
             tokenizer = AutoTokenizer.from_pretrained(args.model)
             tokenizer.pad_token = tokenizer.eos_token
             
-            # Проверяем наличие bitsandbytes, но теперь с более надежной обработкой ошибок
+            # Проверяем наличие bitsandbytes
             try:
                 import bitsandbytes as bnb
                 # Если bitsandbytes установлен, используем 4-bit квантование
@@ -204,9 +204,9 @@ def finetune(args):
                     quantization_config=bnb_config,
                     device_map="auto",
                 )
-            except (ImportError, ModuleNotFoundError, Exception) as e:
-                # Если bitsandbytes не установлен или возникла другая ошибка, загружаем модель напрямую
-                logger.warning(f"bitsandbytes not available ({e}), using regular model loading")
+            except ImportError:
+                # Если bitsandbytes не установлен, загружаем модель напрямую
+                logger.warning("bitsandbytes not installed, using regular model loading")
                 model = AutoModelForCausalLM.from_pretrained(
                     args.model,
                     load_in_4bit=True,
@@ -322,7 +322,7 @@ def finetune(args):
 # ───── Валидация и резолв путей ─────
 MODEL_PATH = resolve_model_path(args.model)
 args.model = MODEL_PATH
-args.output = str(MODELS_DIR / args.output) # тоже автоматически в ./models/
+args.output = str(MODELS_DIR / args.output)  # тоже автоматически в ./models/
 
 if not args.data.exists():
     raise FileNotFoundError(f"Данные не найдены: {args.data}")

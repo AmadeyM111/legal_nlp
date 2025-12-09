@@ -322,7 +322,7 @@ def finetune(args):
 # ───── Валидация и резолв путей ─────
 MODEL_PATH = resolve_model_path(args.model)
 args.model = MODEL_PATH
-args.output = str(MODELS_DIR / args.output) # тоже автоматически в ./models/
+args.output = str(MODELS_DIR / args.output)  # тоже автоматически в ./models/
 
 if not args.data.exists():
     raise FileNotFoundError(f"Данные не найдены: {args.data}")

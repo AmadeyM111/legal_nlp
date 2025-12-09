@@ -1,0 +1,24 @@
+2025-12-09 19:37:25,055 - INFO - Setting up fine-tuning script...
+2025-12-09 19:37:25,055 - INFO - Backend detected: cuda
+2025-12-09 19:40:46,883 - INFO - Setting up fine-tuning script...
+2025-12-09 19:40:46,883 - INFO - Backend detected: cuda
+2025-12-09 19:40:46,884 - INFO - Проект: /Users/antonamadeus/github-projects/Active/experimental
+2025-12-09 19:40:46,884 - INFO - Модель: /Users/antonamadeus/github-projects/Active/experimental/models/saiga_mistral_7b_merged
+2025-12-09 19:40:46,884 - INFO - Данные: /Users/antonamadeus/github-projects/Active/experimental/data/processed/synthetic_qa_labeled.json
+2025-12-09 19:40:46,884 - INFO - Сохранение: /Users/antonamadeus/github-projects/Active/experimental/models/models/saiga-legal-7b
+2025-12-09 19:40:46,884 - INFO - Starting fine-tuning with model: /Users/antonamadeus/github-projects/Active/experimental/models/saiga_mistral_7b_merged, data: /Users/antonamadeus/github-projects/Active/experimental/data/processed/synthetic_qa_labeled.json
+2025-12-09 19:40:49,291 - INFO - Transformers + QLoRA (Unsloth not available)
+2025-12-09 19:40:49,291 - INFO - Loading model: /Users/antonamadeus/github-projects/Active/experimental/models/saiga_mistral_7b_merged
+2025-12-09 19:40:49,360 - WARNING - bitsandbytes not installed, using regular model loading
+2025-12-09 19:40:49,366 - ERROR - Error during fine-tuning: No package metadata was found for bitsandbytes
+2025-12-09 19:48:21,518 - INFO - Setting up fine-tuning script...
+2025-12-09 19:48:21,519 - INFO - Backend detected: cuda
+2025-12-09 19:48:21,519 - INFO - Проект: /Users/antonamadeus/github-projects/Active/experimental
+2025-12-09 19:48:21,519 - INFO - Модель: /Users/antonamadeus/github-projects/Active/experimental/models/saiga_mistral_7b_merged
+2025-12-09 19:48:21,519 - INFO - Данные: /Users/antonamadeus/github-projects/Active/experimental/data/processed/synthetic_qa_labeled.json
+2025-12-09 19:48:21,519 - INFO - Сохранение: /Users/antonamadeus/github-projects/Active/experimental/models/models/saiga-legal-7b
+2025-12-09 19:48:21,519 - INFO - Starting fine-tuning with model: /Users/antonamadeus/github-projects/Active/experimental/models/saiga_mistral_7b_merged, data: /Users/antonamadeus/github-projects/Active/experimental/data/processed/synthetic_qa_labeled.json
+2025-12-09 19:48:24,018 - INFO - Transformers + QLoRA (Unsloth not available)
+2025-12-09 19:48:24,018 - INFO - Loading model: /Users/antonamadeus/github-projects/Active/experimental/models/saiga_mistral_7b_merged
+2025-12-09 19:48:24,084 - WARNING - bitsandbytes not available (No module named 'bitsandbytes'), using regular model loading
+2025-12-09 19:48:24,090 - ERROR - Error during fine-tuning: No package metadata was found for bitsandbytes

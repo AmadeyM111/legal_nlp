@@ -27,34 +27,6 @@ def resolve_model_path(model_arg: str) -> str:
             f"Или укажи полное имя на HF: IlyaGusev/saiga_mistral_7b_lora"
         )
 
-# Set up logging first before any other processing
-parser = argparse.ArgumentParser()
-parser.add_argument("--data", type=Path, default=PROJECT_ROOT / "data" / "processed" / "synthetic_qa_cleaned.json")
-parser.add_argument("--model", type=str, default="saiga_mistral_7b_merged",   # ← теперь просто имя папки!
-                    help="Либо имя папки в ./models/, либо полное HF repo (IlyaGusev/...)")
-parser.add_argument("--output", type=str, default="models/saiga-legal-7b")
-parser.add_argument("--iters", type=int, default=3000)
-parser.add_argument("--batch", type=int, default=8)
-parser.add_argument("--rank", type=int, default=64)
-parser.add_argument("--lr", type=float, default=2e-4)
-parser.add_argument("--log_file", type=str, default="fine_tuning.log", help="Path to log file")
-args = parser.parse_args()
-
-# Setup logging first thing
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(args.log_file),
-        logging.StreamHandler()  # Also log to console
-    ]
-)
-
-logger = logging.getLogger(__name__)
-
-# Now we can safely use logger
-logger.info("Setting up fine-tuning script...")
-
 # Автоопределение бэкенда и установка нужного
 def install_backend():
     try:
@@ -81,14 +53,14 @@ def install_backend():
     return "cuda" # fallback
 
 BACKEND = install_backend()
-logger.info(f"Backend detected: {BACKEND}")
 
-def finetune(args):
-    if BACKEND == "mlx":
-        # Apple Silicon
-        from mlx_lm import load, lora
-        logger.info("Loading model with MLX backend")
-        
+if BACKEND == "mlx":
+    # Apple Silicon
+    from mlx_lm import load, lora
+    logger.info("Apple Silicon detected → MLX-LM")
+
+    def finetune(args):
+        logger.info(f"Loading model: {args.model}")
         model, tokenizer = load(args.model)
         
         logger.info(f"Loading training data: {args.data}")
@@ -138,35 +110,36 @@ def finetune(args):
         model.save(args.output)
         tokenizer.save(args.output)
         logger.info(f"Model saved to {args.output}")
-    else:
-        # GPU/CPU backend - Transformers + PEFT
-        import torch
-        from transformers import AutoTokenizer, TrainingArguments, Trainer, AutoModelForCausalLM
-        from peft import LoraConfig, get_peft_model
-        
-        # Определяем, поддерживается ли bfloat16
-        def is_bfloat16_supported():
-            try:
-                import torch
-                # Проверяем поддержку bfloat16 на доступных устройствах
-                if torch.cuda.is_available():
-                    # Для CUDA проверяем, поддерживает ли GPU bfloat16
-                    return torch.cuda.is_bf16_supported()
-                else:
-                    # Для CPU и MPS поддержка bfloat16 может быть ограничена
-                    return False
-            except:
-                return False
 
-        # Try to use Unsloth if available
+else:
+    # Любой GPU/CPU — Transformers + PEFT + Unsloth (самый быстрый на CUDA в 2025)
+    import torch
+    from transformers import AutoTokenizer, TrainingArguments, Trainer, AutoModelForCausalLM
+    from peft import LoraConfig, get_peft_model
+    
+    # Определяем, поддерживается ли bfloat16
+    def is_bfloat16_supported():
         try:
-            from unsloth import FastLanguageModel
-            USE_UNSLOTH = True
-            logger.info("Unsloth detected → до 2.5× быстрее + 70% меньше VRAM")
-        except ImportError:
-            USE_UNSLOTH = False
-            logger.info("Transformers + QLoRA (Unsloth not available)")
+            import torch
+            # Проверяем поддержку bfloat16 на доступных устройствах
+            if torch.cuda.is_available():
+                # Для CUDA проверяем, поддерживает ли GPU bfloat16
+                return torch.cuda.is_bf16_supported()
+            else:
+                # Для CPU и MPS поддержка bfloat16 может быть ограничена
+                return False
+        except:
+            return False
 
+    try:
+        from unsloth import FastLanguageModel
+        USE_UNSLOTH = True
+        logger.info("Unsloth detected → до 2.5× быстрее + 70% меньше VRAM")
+    except ImportError:
+        USE_UNSLOTH = False
+        logger.info("Transformers + QLoRA")
+
+    def finetune(args):
         logger.info(f"Loading model: {args.model}")
         if USE_UNSLOTH:
             model, tokenizer = FastLanguageModel.from_pretrained(
@@ -188,7 +161,7 @@ def finetune(args):
             tokenizer = AutoTokenizer.from_pretrained(args.model)
             tokenizer.pad_token = tokenizer.eos_token
             
-            # Проверяем наличие bitsandbytes, но теперь с более надежной обработкой ошибок
+            # Проверяем наличие bitsandbytes
             try:
                 import bitsandbytes as bnb
                 # Если bitsandbytes установлен, используем 4-bit квантование
@@ -204,15 +177,53 @@ def finetune(args):
                     quantization_config=bnb_config,
                     device_map="auto",
                 )
-            except (ImportError, ModuleNotFoundError, Exception) as e:
-                # Если bitsandbytes не установлен или возникла другая ошибка, загружаем модель напрямую
-                logger.warning(f"bitsandbytes not available ({e}), using regular model loading")
-                model = AutoModelForCausalLM.from_pretrained(
-                    args.model,
-                    load_in_4bit=True,
-                    torch_dtype=torch.bfloat16 if is_bfloat16_supported() else torch.float16,
-                    device_map="auto",
-                )
+            except ImportError:
+                # Если bitsandbytes не установлен, проверяем, есть ли safetensors
+                # Проверяем также, есть ли файл index (указывает на шардинг) и если есть safetensors, то используем device_map
+                import os
+                index_file = os.path.join(args.model, "pytorch_model.bin.index.json")
+                safetensors_files = [f for f in os.listdir(args.model) if f.endswith('.safetensors')]
+                
+                if os.path.exists(index_file) and safetensors_files:
+                    # Если есть и индекс, и safetensors файлы, можно использовать device_map
+                    try:
+                        import safetensors
+                        model = AutoModelForCausalLM.from_pretrained(
+                            args.model,
+                            torch_dtype=torch.bfloat16 if is_bfloat16_supported() else torch.float16,
+                            device_map="auto",
+                        )
+                    except ImportError:
+                        # Если safetensors не установлен, но есть индекс и .bin файлы, создаем временную папку для offload
+                        logger.warning("safetensors не установлен, но обнаружен шардинг. Создаем временную папку для offload...")
+                        import tempfile
+                        with tempfile.TemporaryDirectory() as offload_folder:
+                            model = AutoModelForCausalLM.from_pretrained(
+                                args.model,
+                                torch_dtype=torch.bfloat16 if is_bfloat16_supported() else torch.float16,
+                                device_map="auto",
+                                offload_folder=offload_folder
+                            )
+                elif os.path.exists(index_file):
+                    # Есть индекс, но нет safetensors - используем временную папку для offload
+                    logger.warning("Обнаружен шардинг весов, создаем временную папку для offload...")
+                    import tempfile
+                    with tempfile.TemporaryDirectory() as offload_folder:
+                        model = AutoModelForCausalLM.from_pretrained(
+                            args.model,
+                            torch_dtype=torch.bfloat16 if is_bfloat16_supported() else torch.float16,
+                            device_map="auto",
+                            offload_folder=offload_folder
+                        )
+                else:
+                    # Нет шардинг - загружаем нормально без device_map
+                    model = AutoModelForCausalLM.from_pretrained(
+                        args.model,
+                        torch_dtype=torch.bfloat16 if is_bfloat16_supported() else torch.float16,
+                    )
+                    # Ручное перемещение на GPU если доступно
+                    if torch.cuda.is_available():
+                        model = model.to('cuda')
             
             model = prepare_model_for_kbit_training(model)
             model = get_peft_model(model, LoraConfig(
@@ -252,14 +263,6 @@ def finetune(args):
             raise ValueError("No valid training data found after filtering")
             
         logger.info(f"Processing {len(filtered_raw)} valid examples")
-        # Check the first few examples to understand the data format
-        if filtered_raw:
-            sample_item = filtered_raw[0]
-            logger.info(f"Sample data keys: {list(sample_item.keys())}")
-            user_sample = sample_item.get("case") or sample_item.get("question", "") or sample_item.get("article_title", "")
-            ans_sample = sample_item.get("article") or sample_item.get("answer", "") or sample_item.get("context", "")
-            logger.info(f"Sample input (first 100 chars): {user_sample[:100]}...")
-            logger.info(f"Sample output (first 100 chars): {ans_sample[:100]}...")
         
         dataset = Dataset.from_list(filtered_raw)
         def formatting_func(ex):
@@ -269,77 +272,75 @@ def finetune(args):
             return {"text": text}
         dataset = dataset.map(lambda x: {"text": formatting_func(x)["text"]})
 
-        # Try to use SFTTrainer if available, otherwise use regular Trainer
-        try:
-            from trl import SFTTrainer
-            trainer = SFTTrainer(
-                model=model,
-                train_dataset=dataset,
-                args=TrainingArguments(
-                    per_device_train_batch_size=args.batch,
-                    gradient_accumulation_steps=max(1, 8//args.batch),  # Prevent division by zero
-                    num_train_epochs=3,
-                    learning_rate=args.lr,
-                    fp16=not is_bfloat16_supported(),
-                    bf16=is_bfloat16_supported(),
-                    logging_steps=10,
-                    save_steps=500,
-                    output_dir=args.output,
-                    optim="adamw_8bit",
-                    report_to="none",
-                    remove_unused_columns=False,  # Important for custom formatting
-                ),
-                dataset_text_field="text",
-                max_seq_length=2048,
-            )
-            logger.info("Using SFTTrainer")
-        except ImportError:
-            # If SFTTrainer is not available, use regular Trainer with a data collator
-            logger.info("SFTTrainer not available, using regular Trainer")
-            trainer = Trainer(
-                model=model,
-                train_dataset=dataset,
-                args=TrainingArguments(
-                    per_device_train_batch_size=args.batch,
-                    gradient_accumulation_steps=max(1, 8//args.batch),  # Prevent division by zero
-                    num_train_epochs=3,
-                    learning_rate=args.lr,
-                    fp16=not is_bfloat16_supported(),
-                    bf16=is_bfloat16_supported(),
-                    logging_steps=10,
-                    save_steps=500,
-                    output_dir=args.output,
-                    optim="adamw_8bit",
-                    report_to="none",
-                    remove_unused_columns=False,  # Important for custom formatting
-                ),
-            )
+        trainer = Trainer(
+            model=model,
+            train_dataset=dataset,
+            args=TrainingArguments(
+                per_device_train_batch_size=args.batch,
+                gradient_accumulation_steps=max(1, 8//args.batch),  # Prevent division by zero
+                num_train_epochs=3,
+                learning_rate=args.lr,
+                fp16=not is_bfloat16_supported(),
+                bf16=is_bfloat16_supported(),
+                logging_steps=10,
+                save_steps=500,
+                output_dir=args.output,
+                optim="adamw_8bit",
+                report_to="none",
+                remove_unused_columns=False,  # Important for custom formatting
+            ),
+            dataset_text_field="text",
+            max_seq_length=2048,
+        )
         trainer.train()
         model.save_pretrained(args.output)
         tokenizer.save_pretrained(args.output)
         logger.info(f"Model saved to {args.output}")
 
-# ───── Валидация и резолв путей ─────
+# ──────────────────────── ARGUMENTS ────────────────────────
+parser = argparse.ArgumentParser()
+parser.add_argument("--data", type=Path, default=PROJECT_ROOT / "data" / "processed" / "synthetic_qa_cleaned.json")
+parser.add_argument("--model", type=str, default="saiga_mistral_7b_merged",   # ← теперь просто имя папки!
+                    help="Либо имя папки в ./models/, либо полное HF repo (IlyaGusev/...)")
+parser.add_argument("--output", type=str, default="models/saiga-legal-7b")
+parser.add_argument("--iters", type=int, default=3000)
+parser.add_argument("--batch", type=int, default=8)
+parser.add_argument("--rank", type=int, default=64)
+parser.add_argument("--lr", type=float, default=2e-4)
+parser.add_argument("--log_file", type=str, default="fine_tuning.log", help="Path to log file")
+args = parser.parse_args()
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(args.log_file),
+        logging.StreamHandler()  # Also log to console
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+# ← Вот и вся магия:
 MODEL_PATH = resolve_model_path(args.model)
 args.model = MODEL_PATH
-args.output = str(MODELS_DIR / args.output) # тоже автоматически в ./models/
+args.output = str(MODELS_DIR / args.output)  # тоже автоматически в ./models/
 
+# ───── Валидация и резолв путей ─────
 if not args.data.exists():
     raise FileNotFoundError(f"Данные не найдены: {args.data}")
 
 Path(args.output).mkdir(parents=True, exist_ok=True)
 
-logger.info(f"Проект: {PROJECT_ROOT}")
-logger.info(f"Модель: {args.model}")
-logger.info(f"Данные: {args.data}")
-logger.info(f"Сохранение: {args.output}")
+print(f"Проект: {PROJECT_ROOT}")
+print(f"Модель: {args.model}")
+print(f"Данные: {args.data}")
+print(f"Сохранение: {args.output}")
 
 try:
-    logger.info(f"Starting fine-tuning with model: {args.model}, data: {args.data}")
     finetune(args)
-    logger.info(f"Fine-tuning completed successfully → {args.output}")
     print(f"ГОТОВО → {args.output}")
 except Exception as e:
-    logger.error(f"Error during fine-tuning: {str(e)}")
     print(f"ОШИБКА: {e}")
     raise
