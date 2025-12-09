@@ -1,0 +1,124 @@
+# Implementation Plan - Hybrid Model
+
+## Goal
+Build a hybrid legal assistant combining fine-tuned model (LoRA) with RAG fallback for comprehensive and accurate answers.
+
+## Architecture
+
+```mermaid
+graph TD
+    A[Запрос клиента] --> B{Fine-tuned модель}
+    B -->|≥97% уверенность| C[Прямой ответ]
+    B -->|<97%| D[RAG-поиск]
+    D --> E[LLM + контекст]
+    E --> F[Ответ + ссылка]
+```
+
+## Components
+
+### 1. Data Preparation for Fine-Tuning
+**File:** `src/prepare_training_data.py`
+
+Convert `synthetic_qa_cleaned.json` to instruction format:
+```json
+{
+  "instruction": "Ответь на вопрос клиента как старший юрист РФ.",
+  "input": "Могу ли я требовать устранения нарушения?",
+  "output": "Да, согласно ст. 1 ГК РФ...",
+  "article_ref": "ГК РФ. Основные начала..."
+}
+```
+
+**Format:** Alpaca or ChatML (depends on base model).
+
+**Split:** 80% train / 20% test.
+
+---
+
+### 2. FAISS Index Creation
+**File:** `src/build_faiss_index.py`
+
+- **Input:** [data/processed/articles_cleaned.json](file:///Users/antonamadeus/github-projects/Active/legal_nlp/data/processed/articles_cleaned.json) (use [content](file:///Users/antonamadeus/github-projects/Active/legal_nlp/src/clean_dataset.py#12-40) field)
+- **Chunking:** Already done (2500 chars in synthetic data generation)
+- **Embeddings:** Use `sentence-transformers/paraphrase-multilingual-mpnet-base-v2` (Russian support)
+- **Index:** FAISS `IndexFlatL2` or `IndexIVFFlat` (for large-scale)
+- **Output:** `data/faiss_index/` (index + metadata mapping)
+
+---
+
+### 3. LoRA Fine-Tuning
+**File:** `src/train_lora.py`
+
+**Base Model Options:**
+1. **Qwen2-7B-Instruct** (recommended, strong multilingual)
+2. **Saiga-Mistral-7B** (Russian-focused)
+
+**LoRA Config:**
+- Rank: 16
+- Alpha: 32
+- Target modules: `q_proj`, `v_proj`, `k_proj`, `o_proj`
+- Dropout: 0.05
+
+**Training:**
+- Framework: Hugging Face `transformers` + `peft`
+- Epochs: 3-5
+- Batch size: 4 (with gradient accumulation)
+- Learning rate: 2e-4
+
+**Output:** Adapter weights in `models/lora_adapter/`
+
+---
+
+### 4. Hybrid Inference
+**File:** `src/hybrid_inference.py`
+
+**Logic:**
+```python
+def answer_query(query):
+    # Step 1: Fine-tuned model prediction
+    response, confidence = fine_tuned_model(query)
+    
+    if confidence >= 0.97:
+        return response
+    
+    # Step 2: RAG fallback
+    retrieved_chunks = faiss_search(query, top_k=3)
+    context = "\n".join(retrieved_chunks)
+    
+    # Step 3: Chain-of-Thought prompt
+    prompt = f"""
+    Ты — старший юрист РФ.
+    Клиент задал вопрос: {query}
+    
+    Найденные статьи:
+    {context}
+    
+    Дай точный ответ и объясни, почему именно эта статья применима.
+    """
+    
+    return llm.generate(prompt)
+```
+
+**CoT Prompt:** Ask model to explain reasoning.
+
+**Output Format:**
+```json
+{
+  "answer": "...",
+  "article_ref": "Статья 142 ТК РФ",
+  "quote": "Полный текст статьи...",
+  "confidence": 0.95,
+  "method": "rag"
+}
+```
+
+---
+
+## Implementation Order
+1. **Data Prep** (easiest, unblocks training)
+2. **FAISS Index** (can run in parallel with training)
+3. **LoRA Training** (longest step, ~2-4 hours on GPU)
+4. **Hybrid Inference** (combines everything)
+
+## Next Steps
+Which component should I start with?

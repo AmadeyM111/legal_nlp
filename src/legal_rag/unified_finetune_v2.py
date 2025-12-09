@@ -24,7 +24,7 @@ def install_backend():
 BACKEND = install_backend()
 
 if BACKEND == "mlx":
-    # Apple Silicon — самый быстрый способ
+    # Apple Silicon
     from mlx_lm import load, lora
     print("Apple Silicon detected → MLX-LM")
 
@@ -194,32 +194,55 @@ else:
 
 # === Запуск ===
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data", default="data/processed/synthetic_qa_cleaned.json", help="Path to training data JSON file")
-    parser.add_argument("--model", default="saiga_mistral_7b_merged", help="Base model to fine-tune")
-    parser.add_argument("--output", default="models/saiga-legal-7b", help="Output directory for fine-tuned model")
-    parser.add_argument("--iters", type=int, default=2000, help="Number of training iterations (MLX only)")  # только для MLX
-    parser.add_argument("--batch", type=int, default=4, help="Training batch size")
-    parser.add_argument("--rank", type=int, default=64, help="LoRA rank parameter")
-    parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
+    SCRIPT_DIR = Path(__file__).resolve().parent
+    PROJECT_ROOT = SCRIPT_DIR.parent.parent
+    MODELS_DIR = PROJECT_ROOT / "models"
+    DATA_DIR = PROJECT_ROOT / "data" / "processed"
+
+    def resolve_model_path(name_or_path: str) -> str:
+        path = Path(name_or_path)
+        if path.exists():
+            return str(path.resolve())
+        candidate = MODELS_DIR / name_or_path
+        if candidate.is_dir() and (candidate / "config.json").exists():
+            return str(candidate.resolve())
+        return name_or_path  # HF repo
+
+    parser = argparse.ArgumentParser(description="Универсальный LoRA файн-тюнинг")
+    parser.add_argument("--data", 
+                        type=Path,
+                        default=DATA_DIR / "synthetic_qa_cleaned.json",
+                        help="JSON с данными")
+    parser.add_argument("--model", 
+                        type=str,
+                        default="saiga_mistral_7b_merged",
+                        help="Имя папки в ./models/ | HF repo | полный путь")
+    parser.add_argument("--output", 
+                        type=str,
+                        default="saiga-legal-7b",
+                        help="Имя папки в ./models/ для результата")
+    parser.add_argument("--batch", type=int, default=8)
+    parser.add_argument("--iters", type=int, default=3000, help="Только для MLX")
+    parser.add_argument("--rank", type=int, default=64)
+    parser.add_argument("--lr", type=float, default=2e-4)
     args = parser.parse_args()
 
-    # Validate input file exists
-    if not Path(args.data).exists():
-        raise FileNotFoundError(f"Training data file not found: {args.data}")
-    
-    # Validate model exists
-    if not Path(args.model).exists() and not args.model.startswith("http"):
-        # Try to load from hub to check if it exists
-        try:
-            from transformers import AutoConfig
-            AutoConfig.from_pretrained(args.model)
-        except:
-            raise ValueError(f"Model not found: {args.model}")
+    # ───── Валидация и резолв путей ─────
+    if not args.data.exists():
+        raise FileNotFoundError(f"Данные не найдены: {args.data}")
+
+    args.model = resolve_model_path(args.model)
+    args.output = str(MODELS_DIR / args.output)
+    Path(args.output).mkdir(parents=True, exist_ok=True)
+
+    print(f"Проект: {PROJECT_ROOT}")
+    print(f"Модель: {args.model}")
+    print(f"Данные: {args.data}")
+    print(f"Сохранение: {args.output}")
 
     try:
         finetune(args)
-        print(f"Готово → {args.output}")
+        print(f"ГОТОВО → {args.output}")
     except Exception as e:
-        print(f"Error during fine-tuning: {str(e)}")
+        print(f"ОШИБКА: {e}")
         raise
