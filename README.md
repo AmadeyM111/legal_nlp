@@ -65,6 +65,9 @@ training_args = {
 }
 ```
 
+** Установка зависимостей:**
+uv pip install -r <(uv pip compile pyproject.toml)
+
 **Потребляемые ресурсы:**
 - RAM: 7–11 ГБ  
 - Диск: ~8 ГБ  
