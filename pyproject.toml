@@ -2,6 +2,7 @@
 name = "legal_rag"
 version = "0.1.0"
 requires-python = ">=3.11,<3.13"
+
 description = "Legal RAG + LLM system"
 authors = [{name = "Anton Amadeus", email = "amadey1110@gmail.com"}]
 
@@ -16,20 +17,29 @@ dependencies = [
     "playwright",
     "streamlit>=1.38",
     "ragas",
-    "transformers>=4.40",
+    "transformers>=4.44",
+    "datasets>=2.19",
+    "peft>=0.11",
+    "accelerate>=0.33",
     "huggingface_hub",
     "tqdm",
     "torch>=2.3",
 ]
 
 [project.optional-dependencies]
-dev = ["ruff", "black", "pytest"]
+finetune = [
+    # CUDA (Linux/Windows с NVIDIA)
+    "unsloth[cu121-torch240]>=2024.10; platform_system != 'Darwin'",
+    # Apple Silicon M1/M2/M3/M4
+    "mlx>=0.17; platform_system == 'Darwin'",
+    "mlx-lm>=0.17; platform_system == 'Darwin'",
 
-[project.scripts]
-ingest = "scripts.rebuild_index:main"
-scrape = "scripts.scrape_all:main"
-app = "app.streamlit_app:main"
-eval = "scripts.evaluate:main"
+    "bitsandbytes>=0.43; platform_system != 'Darwin'",
+    "sentencepiece",
+    "trl>=0.9",
+]
+
+dev = ["ruff", "black", "pytest", "pre-commit"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/legal_rag", "src/scrapers"]
