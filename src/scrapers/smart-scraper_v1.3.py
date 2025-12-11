@@ -25,12 +25,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=500)
 def get_all_links_cached(base_url: str) -> list[str]:
     return ZakonRFStrategy().get_links(base_url)
 
 # Корневой каталог проекта — работает из любой папки
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 OUTPUT_DIR = PROJECT_ROOT / "data" / "raw"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
