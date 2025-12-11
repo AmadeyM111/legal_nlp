@@ -11,9 +11,9 @@ MODELS_DIR = PROJECT_ROOT / "models"
 
 def resolve_model_path(model_arg: str) -> str:
     """Умно определяет — это HF-репозиторий, локальная папка или относительный путь"""
-    if model_arg.startswith(("http://", "https://", "hf://")):
+    if model_arg.startswith(("https://", "hf://")):
         return model_arg
-    if "/" in model_arg and model_arg.count("/") >= 1:  # выглядит как HF repo
+    if "/" in model_arg and model_arg.count("/") >= 1: 
         return model_arg
     
     # Иначе — считаем, что это имя папки внутри ./models/
@@ -309,52 +309,27 @@ def finetune(args):
         # Try to use SFTTrainer if available, otherwise use regular Trainer
         try:
             from trl import SFTTrainer
-            # Пытаемся использовать SFTTrainer с dataset_text_field, но с отловом ошибки
-            try:
-                trainer = SFTTrainer(
-                    model=model,
-                    train_dataset=dataset,
-                    args=TrainingArguments(
-                        per_device_train_batch_size=args.batch,
-                        gradient_accumulation_steps=max(1, 8//args.batch),  # Prevent division by zero
-                        num_train_epochs=3,
-                        learning_rate=args.lr,
-                        fp16=not is_bfloat16_supported(),
-                        bf16=is_bfloat16_supported(),
-                        logging_steps=10,
-                        save_steps=500,
-                        output_dir=args.output,
-                        optim="adamw_8bit",
-                        report_to="none",
-                        remove_unused_columns=False,  # Important for custom formatting
-                    ),
-                    dataset_text_field="text",
-                    max_seq_length=2048,
-                )
-                logger.info("Using SFTTrainer with dataset_text_field")
-            except TypeError:
-                # Если dataset_text_field не поддерживается, используем formatting_func
-                trainer = SFTTrainer(
-                    model=model,
-                    train_dataset=dataset,
-                    args=TrainingArguments(
-                        per_device_train_batch_size=args.batch,
-                        gradient_accumulation_steps=max(1, 8//args.batch),  # Prevent division by zero
-                        num_train_epochs=3,
-                        learning_rate=args.lr,
-                        fp16=not is_bfloat16_supported(),
-                        bf16=is_bfloat16_supported(),
-                        logging_steps=10,
-                        save_steps=500,
-                        output_dir=args.output,
-                        optim="adamw_8bit",
-                        report_to="none",
-                        remove_unused_columns=False,  # Important for custom formatting
-                    ),
-                    formatting_func=lambda x: x["text"],
-                    max_seq_length=2048,
-                )
-                logger.info("Using SFTTrainer with formatting_func")
+            trainer = SFTTrainer(
+                model=model,
+                train_dataset=dataset,
+                args=TrainingArguments(
+                    per_device_train_batch_size=args.batch,
+                    gradient_accumulation_steps=max(1, 8//args.batch),  # Prevent division by zero
+                    num_train_epochs=3,
+                    learning_rate=args.lr,
+                    fp16=not is_bfloat16_supported(),
+                    bf16=is_bfloat16_supported(),
+                    logging_steps=10,
+                    save_steps=500,
+                    output_dir=args.output,
+                    optim="adamw_8bit",
+                    report_to="none",
+                    remove_unused_columns=False,  # Important for custom formatting
+                ),
+                dataset_text_field="text",
+                max_seq_length=2048,
+            )
+            logger.info("Using SFTTrainer")
         except ImportError:
             # If SFTTrainer is not available, use regular Trainer with a data collator
             logger.info("SFTTrainer not available, using regular Trainer")

@@ -251,14 +251,46 @@ def finetune(args):
                     if torch.cuda.is_available():
                         model = model.to('cuda')
             
-            model = prepare_model_for_kbit_training(model)
-            model = get_peft_model(model, LoraConfig(
-                r=args.rank,
-                lora_alpha=32,
-                target_modules=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"],
-                lora_dropout=0.05,
-                task_type="CAUSAL_LM",
-            ))
+            try:
+                model = prepare_model_for_kbit_training(model)
+            except RuntimeError as e:
+                if "MPS backend out of memory" in str(e):
+                    logger.warning("MPS out of memory during prepare_model_for_kbit_training, trying alternative approach")
+                    # Удаляем модель из памяти и пробуем с меньшим потреблением памяти
+                    import gc
+                    import torch
+                    del model
+                    gc.collect()
+                    torch.mps.empty_cache()
+                    
+                    # Загружаем модель заново с меньшим потреблением памяти
+                    model = AutoModelForCausalLM.from_pretrained(
+                        args.model,
+                        torch_dtype=torch.float16,
+                        device_map="mps",
+                        low_cpu_mem_usage=True,
+                        trust_remote_code=True,
+                    )
+                    
+                    # Применяем LoRA без prepare_model_for_kbit_training
+                    model = get_peft_model(model, LoraConfig(
+                        r=args.rank,
+                        lora_alpha=32,
+                        target_modules=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"],
+                        lora_dropout=0.05,
+                        task_type="CAUSAL_LM",
+                    ))
+                else:
+                    raise e
+            else:
+                # Если prepare_model_for_kbit_training прошло успешно, применяем LoRA как обычно
+                model = get_peft_model(model, LoraConfig(
+                    r=args.rank,
+                    lora_alpha=32,
+                    target_modules=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"],
+                    lora_dropout=0.05,
+                    task_type="CAUSAL_LM",
+                ))
 
         # Данные
         logger.info(f"Loading training data: {args.data}")

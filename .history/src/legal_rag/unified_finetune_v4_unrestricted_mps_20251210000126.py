@@ -2,8 +2,16 @@
 import json
 import argparse
 import logging
+import os
+import sys
 from pathlib import Path
 from datasets import Dataset
+
+# Проверяем, запущен ли скрипт с отключенным лимитом памяти MPS
+if not os.environ.get('PYTORCH_MPS_HIGH_WATERMARK_RATIO'):
+    # Если нет, устанавливаем переменную среды и перезапускаем скрипт
+    os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.0'
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 # ──────────────── PROJECT ROOT & SMART MODEL RESOLUTION ────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent # src/legal_rag/ → project root
@@ -251,14 +259,48 @@ def finetune(args):
                     if torch.cuda.is_available():
                         model = model.to('cuda')
             
-            model = prepare_model_for_kbit_training(model)
-            model = get_peft_model(model, LoraConfig(
-                r=args.rank,
-                lora_alpha=32,
-                target_modules=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"],
-                lora_dropout=0.05,
-                task_type="CAUSAL_LM",
-            ))
+            # Обработка LoRA с обработкой ошибок нехватки памяти
+            try:
+                model = prepare_model_for_kbit_training(model)
+                model = get_peft_model(model, LoraConfig(
+                    r=args.rank,
+                    lora_alpha=32,
+                    target_modules=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"],
+                    lora_dropout=0.05,
+                    task_type="CAUSAL_LM",
+                ))
+            except RuntimeError as e:
+                if "MPS backend out of memory" in str(e) or "out of memory" in str(e).lower() or "Invalid buffer size" in str(e):
+                    logger.warning("MPS out of memory during prepare_model_for_kbit_training, trying alternative approach")
+                    # Удаляем модель из памяти и пробуем с меньшим потреблением памяти
+                    import gc
+                    del model
+                    gc.collect()
+                    if torch.mps.is_available():
+                        torch.mps.empty_cache()
+                    
+                    # Загружаем модель заново с еще более агрессивной оптимизацией памяти
+                    model = AutoModelForCausalLM.from_pretrained(
+                        args.model,
+                        torch_dtype=torch.float16,
+                        device_map="mps",
+                        low_cpu_mem_usage=True,
+                        trust_remote_code=True,
+                        torch_dtype=torch.float16,
+                        attn_implementation="eager",  # Используем более простую реализацию внимания
+                    )
+                    
+                    # Применяем LoRA без prepare_model_for_kbit_training
+                    model = get_peft_model(model, LoraConfig(
+                        r=max(8, args.rank//2), # Уменьшаем rank вдвое для экономии памяти
+                        lora_alpha=32,
+                        target_modules=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"],
+                        lora_dropout=0.05,
+                        task_type="CAUSAL_LM",
+                    ))
+                    logger.info("Successfully applied LoRA with extreme memory-optimized approach")
+                else:
+                    raise e
 
         # Данные
         logger.info(f"Loading training data: {args.data}")
@@ -269,7 +311,7 @@ def finetune(args):
         if not isinstance(raw, list):
             raise ValueError("Training data must be a JSON array")
             
-        # Filter out invalid entries
+        # Filter out invalid entries and limit dataset size for memory optimization
         filtered_raw = []
         for i, item in enumerate(raw):
             if not isinstance(item, dict):
@@ -285,6 +327,11 @@ def finetune(args):
                 
             filtered_raw.append(item)
             
+            # Ограничиваем размер датасета для экономии памяти
+            if len(filtered_raw) >= 500:  # Ограничиваем до 500 примеров
+                logger.info(f"Dataset limited to {len(filtered_raw)} examples for memory optimization")
+                break
+            
         if len(filtered_raw) == 0:
             raise ValueError("No valid training data found after filtering")
             
@@ -295,7 +342,7 @@ def finetune(args):
             logger.info(f"Sample data keys: {list(sample_item.keys())}")
             user_sample = sample_item.get("case") or sample_item.get("question", "") or sample_item.get("article_title", "")
             ans_sample = sample_item.get("article") or sample_item.get("answer", "") or sample_item.get("context", "")
-            logger.info(f"Sample input (first 100 chars): {user_sample[:100]}...")
+            logger.info(f"Sample input (first 10 chars): {user_sample[:100]}...")
             logger.info(f"Sample output (first 100 chars): {ans_sample[:100]}...")
         
         dataset = Dataset.from_list(filtered_raw)
@@ -309,73 +356,166 @@ def finetune(args):
         # Try to use SFTTrainer if available, otherwise use regular Trainer
         try:
             from trl import SFTTrainer
-            # Пытаемся использовать SFTTrainer с dataset_text_field, но с отловом ошибки
+            # Пытаемся использовать SFTTrainer с разными комбинациями параметров
             try:
+                # Пробуем с dataset_text_field и max_seq_length
                 trainer = SFTTrainer(
                     model=model,
                     train_dataset=dataset,
                     args=TrainingArguments(
-                        per_device_train_batch_size=args.batch,
-                        gradient_accumulation_steps=max(1, 8//args.batch),  # Prevent division by zero
-                        num_train_epochs=3,
+                        per_device_train_batch_size=max(1, args.batch // 4),  # Уменьшаем размер батча вчетверо для экономии памяти
+                        gradient_accumulation_steps=max(1, 32//args.batch),  # Увеличиваем накопление градиентов для компенсации
+                        num_train_epochs=1,  # Уменьшаем количество эпох для экономии памяти
                         learning_rate=args.lr,
                         fp16=not is_bfloat16_supported(),
                         bf16=is_bfloat16_supported(),
                         logging_steps=10,
                         save_steps=500,
                         output_dir=args.output,
-                        optim="adamw_8bit",
+                        optim="adamw_torch",  # Используем torch adamw вместо 8-bit adamw
                         report_to="none",
                         remove_unused_columns=False,  # Important for custom formatting
+                        dataloader_pin_memory=False,  # Отключаем закрепление памяти для экономии
+                        dataloader_num_workers=0,  # Используем 0 воркеров для экономии памяти
+                        gradient_checkpointing=True,  # Включаем градиентный чекпоинтинг для экономии памяти
                     ),
                     dataset_text_field="text",
-                    max_seq_length=2048,
+                    max_seq_length=1024,  # Уменьшаем максимальную длину для экономии памяти
                 )
-                logger.info("Using SFTTrainer with dataset_text_field")
-            except TypeError:
-                # Если dataset_text_field не поддерживается, используем formatting_func
-                trainer = SFTTrainer(
-                    model=model,
-                    train_dataset=dataset,
-                    args=TrainingArguments(
-                        per_device_train_batch_size=args.batch,
-                        gradient_accumulation_steps=max(1, 8//args.batch),  # Prevent division by zero
-                        num_train_epochs=3,
-                        learning_rate=args.lr,
-                        fp16=not is_bfloat16_supported(),
-                        bf16=is_bfloat16_supported(),
-                        logging_steps=10,
-                        save_steps=500,
-                        output_dir=args.output,
-                        optim="adamw_8bit",
-                        report_to="none",
-                        remove_unused_columns=False,  # Important for custom formatting
-                    ),
-                    formatting_func=lambda x: x["text"],
-                    max_seq_length=2048,
-                )
-                logger.info("Using SFTTrainer with formatting_func")
+                logger.info("Using SFTTrainer with extreme memory optimizations")
+            except TypeError as e:
+                if "max_seq_length" in str(e):
+                    # Если max_seq_length не поддерживается, пробуем без него
+                    try:
+                        trainer = SFTTrainer(
+                            model=model,
+                            train_dataset=dataset,
+                            args=TrainingArguments(
+                                per_device_train_batch_size=max(1, args.batch // 4),  # Уменьшаем размер батча вчетверо для экономии памяти
+                                gradient_accumulation_steps=max(1, 32//args.batch),  # Увеличиваем накопление градиентов для компенсации
+                                num_train_epochs=1,  # Уменьшаем количество эпох для экономии памяти
+                                learning_rate=args.lr,
+                                fp16=not is_bfloat16_supported(),
+                                bf16=is_bfloat16_supported(),
+                                logging_steps=10,
+                                save_steps=500,
+                                output_dir=args.output,
+                                optim="adamw_torch",  # Используем torch adamw вместо 8-bit adamw
+                                report_to="none",
+                                remove_unused_columns=False,  # Important for custom formatting
+                                dataloader_pin_memory=False,  # Отключаем закрепление памяти для экономии
+                                dataloader_num_workers=0,  # Используем 0 воркеров для экономии памяти
+                                gradient_checkpointing=True,  # Включаем градиентный чекпоинтинг для экономии памяти
+                            ),
+                            dataset_text_field="text",
+                        )
+                        logger.info("Using SFTTrainer with dataset_text_field only")
+                    except TypeError:
+                        # Если dataset_text_field не поддерживается, используем formatting_func
+                        trainer = SFTTrainer(
+                            model=model,
+                            train_dataset=dataset,
+                            args=TrainingArguments(
+                                per_device_train_batch_size=max(1, args.batch // 4),  # Уменьшаем размер батча вчетверо для экономии памяти
+                                gradient_accumulation_steps=max(1, 32//args.batch),  # Увеличиваем накопление градиентов для компенсации
+                                num_train_epochs=1,  # Уменьшаем количество эпох для экономии памяти
+                                learning_rate=args.lr,
+                                fp16=not is_bfloat16_supported(),
+                                bf16=is_bfloat16_supported(),
+                                logging_steps=10,
+                                save_steps=500,
+                                output_dir=args.output,
+                                optim="adamw_torch",  # Используем torch adamw вместо 8-bit adamw
+                                report_to="none",
+                                remove_unused_columns=False,  # Important for custom formatting
+                                dataloader_pin_memory=False,  # Отключаем закрепление памяти для экономии
+                                dataloader_num_workers=0,  # Используем 0 воркеров для экономии памяти
+                                gradient_checkpointing=True,  # Включаем градиентный чекпоинтинг для экономии памяти
+                            ),
+                            formatting_func=lambda x: x["text"],
+                        )
+                        logger.info("Using SFTTrainer with formatting_func")
+                elif "dataset_text_field" in str(e):
+                    # Если dataset_text_field не поддерживается, используем formatting_func
+                    trainer = SFTTrainer(
+                        model=model,
+                        train_dataset=dataset,
+                        args=TrainingArguments(
+                            per_device_train_batch_size=max(1, args.batch // 4),  # Уменьшаем размер батча вчетверо для экономии памяти
+                            gradient_accumulation_steps=max(1, 32//args.batch),  # Увеличиваем накопление градиентов для компенсации
+                            num_train_epochs=1,  # Уменьшаем количество эпох для экономии памяти
+                            learning_rate=args.lr,
+                            fp16=not is_bfloat16_supported(),
+                            bf16=is_bfloat16_supported(),
+                            logging_steps=10,
+                            save_steps=500,
+                            output_dir=args.output,
+                            optim="adamw_torch",  # Используем torch adamw вместо 8-bit adamw
+                            report_to="none",
+                            remove_unused_columns=False,  # Important for custom formatting
+                            dataloader_pin_memory=False,  # Отключаем закрепление памяти для экономии
+                            dataloader_num_workers=0,  # Используем 0 воркеров для экономии памяти
+                            gradient_checkpointing=True,  # Включаем градиентный чекпоинтинг для экономии памяти
+                        ),
+                        formatting_func=lambda x: x["text"],
+                    )
+                    logger.info("Using SFTTrainer with formatting_func")
+                else:
+                    # Если другая ошибка, пробуем без max_seq_length
+                    trainer = SFTTrainer(
+                        model=model,
+                        train_dataset=dataset,
+                        args=TrainingArguments(
+                            per_device_train_batch_size=max(1, args.batch // 4),  # Уменьшаем размер батча вчетверо для экономии памяти
+                            gradient_accumulation_steps=max(1, 32//args.batch),  # Увеличиваем накопление градиентов для компенсации
+                            num_train_epochs=1,  # Уменьшаем количество эпох для экономии памяти
+                            learning_rate=args.lr,
+                            fp16=not is_bfloat16_supported(),
+                            bf16=is_bfloat16_supported(),
+                            logging_steps=10,
+                            save_steps=500,
+                            output_dir=args.output,
+                            optim="adamw_torch",  # Используем torch adamw вместо 8-bit adamw
+                            report_to="none",
+                            remove_unused_columns=False,  # Important for custom formatting
+                            dataloader_pin_memory=False,  # Отключаем закрепление памяти для экономии
+                            dataloader_num_workers=0,  # Используем 0 воркеров для экономии памяти
+                            gradient_checkpointing=True,  # Включаем градиентный чекпоинтинг для экономии памяти
+                        ),
+                        formatting_func=lambda x: x["text"],
+                    )
+                    logger.info("Using SFTTrainer with formatting_func after error")
         except ImportError:
             # If SFTTrainer is not available, use regular Trainer with a data collator
-            logger.info("SFTTrainer not available, using regular Trainer")
+            logger.info("SFTTrainer not available, using regular Trainer with extreme memory optimizations")
             trainer = Trainer(
                 model=model,
                 train_dataset=dataset,
                 args=TrainingArguments(
-                    per_device_train_batch_size=args.batch,
-                    gradient_accumulation_steps=max(1, 8//args.batch),  # Prevent division by zero
-                    num_train_epochs=3,
+                    per_device_train_batch_size=max(1, args.batch // 4),  # Уменьшаем размер батча вчетверо для экономии памяти
+                    gradient_accumulation_steps=max(1, 32//args.batch),  # Увеличиваем накопление градиентов для компенсации
+                    num_train_epochs=1, # Уменьшаем количество эпох для экономии памяти
                     learning_rate=args.lr,
                     fp16=not is_bfloat16_supported(),
                     bf16=is_bfloat16_supported(),
                     logging_steps=10,
                     save_steps=500,
                     output_dir=args.output,
-                    optim="adamw_8bit",
+                    optim="adamw_torch",  # Используем torch adamw вместо 8-bit adamw
                     report_to="none",
                     remove_unused_columns=False,  # Important for custom formatting
+                    dataloader_pin_memory=False,  # Отключаем закрепление памяти для экономии
+                    dataloader_num_workers=0,  # Используем 0 воркеров для экономии памяти
+                    gradient_checkpointing=True,  # Включаем градиентный чекпоинтинг для экономии памяти
                 ),
             )
+        
+        # Освобождаем память перед началом тренировки
+        import gc
+        if torch.mps.is_available():
+            torch.mps.empty_cache()
+        gc.collect()
+        
         trainer.train()
         model.save_pretrained(args.output)
         tokenizer.save_pretrained(args.output)

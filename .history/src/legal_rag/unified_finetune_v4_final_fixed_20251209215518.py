@@ -309,8 +309,11 @@ def finetune(args):
         # Try to use SFTTrainer if available, otherwise use regular Trainer
         try:
             from trl import SFTTrainer
-            # Пытаемся использовать SFTTrainer с dataset_text_field, но с отловом ошибки
-            try:
+            from packaging import version
+            # Проверяем версию trl и используем соответствующий параметр
+            import trl
+            if version.parse(trl.__version__) >= version.parse("0.7.0"):
+                # В новых версиях используется dataset_text_field
                 trainer = SFTTrainer(
                     model=model,
                     train_dataset=dataset,
@@ -331,9 +334,8 @@ def finetune(args):
                     dataset_text_field="text",
                     max_seq_length=2048,
                 )
-                logger.info("Using SFTTrainer with dataset_text_field")
-            except TypeError:
-                # Если dataset_text_field не поддерживается, используем formatting_func
+            else:
+                # В старых версиях используется formatting_func
                 trainer = SFTTrainer(
                     model=model,
                     train_dataset=dataset,
@@ -354,7 +356,7 @@ def finetune(args):
                     formatting_func=lambda x: x["text"],
                     max_seq_length=2048,
                 )
-                logger.info("Using SFTTrainer with formatting_func")
+            logger.info("Using SFTTrainer")
         except ImportError:
             # If SFTTrainer is not available, use regular Trainer with a data collator
             logger.info("SFTTrainer not available, using regular Trainer")

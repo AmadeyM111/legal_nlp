@@ -190,66 +190,21 @@ def finetune(args):
             
             # Полностью исключаем bitsandbytes из процесса - используем прямую загрузку с 4-bit квантованием
             try:
-                # Проверяем, есть ли файлы индекса для шардинга
-                import os
-                index_file = os.path.join(args.model, "pytorch_model.bin.index.json")
-                safetensors_index = os.path.join(args.model, "model.safetensors.index.json")
-                
-                if os.path.exists(index_file) or os.path.exists(safetensors_index):
-                    # Модель шардирована - используем временную папку для offload
-                    import tempfile
-                    with tempfile.TemporaryDirectory() as offload_folder:
-                        model = AutoModelForCausalLM.from_pretrained(
-                            args.model,
-                            load_in_4bit=True,
-                            torch_dtype=torch.bfloat16 if is_bfloat16_supported() else torch.float16,
-                            device_map="auto",
-                            offload_folder=offload_folder,
-                        )
-                else:
-                    # Модель не шардирована - загружаем напрямую
-                    model = AutoModelForCausalLM.from_pretrained(
-                        args.model,
-                        load_in_4bit=True,
-                        torch_dtype=torch.bfloat16 if is_bfloat16_supported() else torch.float16,
-                        device_map="auto",
-                    )
+                # Пробуем загрузить модель с 4-bit квантованием напрямую
+                model = AutoModelForCausalLM.from_pretrained(
+                    args.model,
+                    load_in_4bit=True,
+                    torch_dtype=torch.bfloat16 if is_bfloat16_supported() else torch.float16,
+                    device_map="auto",
+                )
             except Exception as e:
                 logger.warning(f"4-bit loading failed ({e}), falling back to normal loading")
-                # Если 4-bit квантование не работает, пробуем без него
-                try:
-                    import os
-                    index_file = os.path.join(args.model, "pytorch_model.bin.index.json")
-                    safetensors_index = os.path.join(args.model, "model.safetensors.index.json")
-                    
-                    if os.path.exists(index_file) or os.path.exists(safetensors_index):
-                        # Модель шардирована - используем временную папку для offload
-                        import tempfile
-                        with tempfile.TemporaryDirectory() as offload_folder:
-                            model = AutoModelForCausalLM.from_pretrained(
-                                args.model,
-                                torch_dtype=torch.float16,  # используем float16 вместо bfloat16
-                                device_map="auto",
-                                offload_folder=offload_folder,
-                            )
-                    else:
-                        # Модель не шардирована - загружаем напрямую
-                        model = AutoModelForCausalLM.from_pretrained(
-                            args.model,
-                            torch_dtype=torch.float16,  # используем float16 вместо bfloat16
-                            device_map="auto",
-                        )
-                except Exception as e2:
-                    logger.warning(f"Normal loading also failed ({e2}), trying without device_map")
-                    # Если ничего не работает, пробуем загрузить без device_map
-                    model = AutoModelForCausalLM.from_pretrained(
-                        args.model,
-                        torch_dtype=torch.float16,
-                        low_cpu_mem_usage=True,
-                    )
-                    # Перемещаем модель на GPU вручную, если доступно
-                    if torch.cuda.is_available():
-                        model = model.to('cuda')
+                # Если 4-bit квантование не работает, используем обычную загрузку
+                model = AutoModelForCausalLM.from_pretrained(
+                    args.model,
+                    torch_dtype=torch.float16,  # используем float16 вместо bfloat16
+                    device_map="auto",
+                )
             
             model = prepare_model_for_kbit_training(model)
             model = get_peft_model(model, LoraConfig(
@@ -309,52 +264,27 @@ def finetune(args):
         # Try to use SFTTrainer if available, otherwise use regular Trainer
         try:
             from trl import SFTTrainer
-            # Пытаемся использовать SFTTrainer с dataset_text_field, но с отловом ошибки
-            try:
-                trainer = SFTTrainer(
-                    model=model,
-                    train_dataset=dataset,
-                    args=TrainingArguments(
-                        per_device_train_batch_size=args.batch,
-                        gradient_accumulation_steps=max(1, 8//args.batch),  # Prevent division by zero
-                        num_train_epochs=3,
-                        learning_rate=args.lr,
-                        fp16=not is_bfloat16_supported(),
-                        bf16=is_bfloat16_supported(),
-                        logging_steps=10,
-                        save_steps=500,
-                        output_dir=args.output,
-                        optim="adamw_8bit",
-                        report_to="none",
-                        remove_unused_columns=False,  # Important for custom formatting
-                    ),
-                    dataset_text_field="text",
-                    max_seq_length=2048,
-                )
-                logger.info("Using SFTTrainer with dataset_text_field")
-            except TypeError:
-                # Если dataset_text_field не поддерживается, используем formatting_func
-                trainer = SFTTrainer(
-                    model=model,
-                    train_dataset=dataset,
-                    args=TrainingArguments(
-                        per_device_train_batch_size=args.batch,
-                        gradient_accumulation_steps=max(1, 8//args.batch),  # Prevent division by zero
-                        num_train_epochs=3,
-                        learning_rate=args.lr,
-                        fp16=not is_bfloat16_supported(),
-                        bf16=is_bfloat16_supported(),
-                        logging_steps=10,
-                        save_steps=500,
-                        output_dir=args.output,
-                        optim="adamw_8bit",
-                        report_to="none",
-                        remove_unused_columns=False,  # Important for custom formatting
-                    ),
-                    formatting_func=lambda x: x["text"],
-                    max_seq_length=2048,
-                )
-                logger.info("Using SFTTrainer with formatting_func")
+            trainer = SFTTrainer(
+                model=model,
+                train_dataset=dataset,
+                args=TrainingArguments(
+                    per_device_train_batch_size=args.batch,
+                    gradient_accumulation_steps=max(1, 8//args.batch),  # Prevent division by zero
+                    num_train_epochs=3,
+                    learning_rate=args.lr,
+                    fp16=not is_bfloat16_supported(),
+                    bf16=is_bfloat16_supported(),
+                    logging_steps=10,
+                    save_steps=500,
+                    output_dir=args.output,
+                    optim="adamw_8bit",
+                    report_to="none",
+                    remove_unused_columns=False,  # Important for custom formatting
+                ),
+                dataset_text_field="text",
+                max_seq_length=2048,
+            )
+            logger.info("Using SFTTrainer")
         except ImportError:
             # If SFTTrainer is not available, use regular Trainer with a data collator
             logger.info("SFTTrainer not available, using regular Trainer")

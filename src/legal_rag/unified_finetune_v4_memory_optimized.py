@@ -251,14 +251,46 @@ def finetune(args):
                     if torch.cuda.is_available():
                         model = model.to('cuda')
             
-            model = prepare_model_for_kbit_training(model)
-            model = get_peft_model(model, LoraConfig(
-                r=args.rank,
-                lora_alpha=32,
-                target_modules=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"],
-                lora_dropout=0.05,
-                task_type="CAUSAL_LM",
-            ))
+            # Обработка LoRA с обработкой ошибок нехватки памяти
+            try:
+                model = prepare_model_for_kbit_training(model)
+                model = get_peft_model(model, LoraConfig(
+                    r=args.rank,
+                    lora_alpha=32,
+                    target_modules=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"],
+                    lora_dropout=0.05,
+                    task_type="CAUSAL_LM",
+                ))
+            except RuntimeError as e:
+                if "MPS backend out of memory" in str(e) or "out of memory" in str(e).lower():
+                    logger.warning("MPS out of memory during prepare_model_for_kbit_training, trying alternative approach")
+                    # Удаляем модель из памяти и пробуем с меньшим потреблением памяти
+                    import gc
+                    del model
+                    gc.collect()
+                    if torch.mps.is_available():
+                        torch.mps.empty_cache()
+                    
+                    # Загружаем модель заново с меньшим потреблением памяти
+                    model = AutoModelForCausalLM.from_pretrained(
+                        args.model,
+                        torch_dtype=torch.float16,
+                        device_map="mps",
+                        low_cpu_mem_usage=True,
+                        trust_remote_code=True,
+                    )
+                    
+                    # Применяем LoRA без prepare_model_for_kbit_training
+                    model = get_peft_model(model, LoraConfig(
+                        r=args.rank,
+                        lora_alpha=32,
+                        target_modules=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"],
+                        lora_dropout=0.05,
+                        task_type="CAUSAL_LM",
+                    ))
+                    logger.info("Successfully applied LoRA with memory-optimized approach")
+                else:
+                    raise e
 
         # Данные
         logger.info(f"Loading training data: {args.data}")
@@ -309,8 +341,9 @@ def finetune(args):
         # Try to use SFTTrainer if available, otherwise use regular Trainer
         try:
             from trl import SFTTrainer
-            # Пытаемся использовать SFTTrainer с dataset_text_field, но с отловом ошибки
+            # Пытаемся использовать SFTTrainer с разными комбинациями параметров
             try:
+                # Пробуем с dataset_text_field и max_seq_length
                 trainer = SFTTrainer(
                     model=model,
                     train_dataset=dataset,
@@ -331,30 +364,77 @@ def finetune(args):
                     dataset_text_field="text",
                     max_seq_length=2048,
                 )
-                logger.info("Using SFTTrainer with dataset_text_field")
-            except TypeError:
-                # Если dataset_text_field не поддерживается, используем formatting_func
-                trainer = SFTTrainer(
-                    model=model,
-                    train_dataset=dataset,
-                    args=TrainingArguments(
-                        per_device_train_batch_size=args.batch,
-                        gradient_accumulation_steps=max(1, 8//args.batch),  # Prevent division by zero
-                        num_train_epochs=3,
-                        learning_rate=args.lr,
-                        fp16=not is_bfloat16_supported(),
-                        bf16=is_bfloat16_supported(),
-                        logging_steps=10,
-                        save_steps=500,
-                        output_dir=args.output,
-                        optim="adamw_8bit",
-                        report_to="none",
-                        remove_unused_columns=False,  # Important for custom formatting
-                    ),
-                    formatting_func=lambda x: x["text"],
-                    max_seq_length=2048,
-                )
-                logger.info("Using SFTTrainer with formatting_func")
+                logger.info("Using SFTTrainer with dataset_text_field and max_seq_length")
+            except TypeError as e:
+                if "max_seq_length" in str(e):
+                    # Если max_seq_length не поддерживается, пробуем без него
+                    try:
+                        trainer = SFTTrainer(
+                            model=model,
+                            train_dataset=dataset,
+                            args=TrainingArguments(
+                                per_device_train_batch_size=args.batch,
+                                gradient_accumulation_steps=max(1, 8//args.batch),  # Prevent division by zero
+                                num_train_epochs=3,
+                                learning_rate=args.lr,
+                                fp16=not is_bfloat16_supported(),
+                                bf16=is_bfloat16_supported(),
+                                logging_steps=10,
+                                save_steps=500,
+                                output_dir=args.output,
+                                optim="adamw_8bit",
+                                report_to="none",
+                                remove_unused_columns=False,  # Important for custom formatting
+                            ),
+                            dataset_text_field="text",
+                        )
+                        logger.info("Using SFTTrainer with dataset_text_field only")
+                    except TypeError:
+                        # Если dataset_text_field не поддерживается, используем formatting_func
+                        trainer = SFTTrainer(
+                            model=model,
+                            train_dataset=dataset,
+                            args=TrainingArguments(
+                                per_device_train_batch_size=args.batch,
+                                gradient_accumulation_steps=max(1, 8//args.batch),  # Prevent division by zero
+                                num_train_epochs=3,
+                                learning_rate=args.lr,
+                                fp16=not is_bfloat16_supported(),
+                                bf16=is_bfloat16_supported(),
+                                logging_steps=10,
+                                save_steps=500,
+                                output_dir=args.output,
+                                optim="adamw_8bit",
+                                report_to="none",
+                                remove_unused_columns=False,  # Important for custom formatting
+                            ),
+                            formatting_func=lambda x: x["text"],
+                        )
+                        logger.info("Using SFTTrainer with formatting_func")
+                elif "dataset_text_field" in str(e):
+                    # Если dataset_text_field не поддерживается, используем formatting_func
+                    trainer = SFTTrainer(
+                        model=model,
+                        train_dataset=dataset,
+                        args=TrainingArguments(
+                            per_device_train_batch_size=args.batch,
+                            gradient_accumulation_steps=max(1, 8//args.batch),  # Prevent division by zero
+                            num_train_epochs=3,
+                            learning_rate=args.lr,
+                            fp16=not is_bfloat16_supported(),
+                            bf16=is_bfloat16_supported(),
+                            logging_steps=10,
+                            save_steps=500,
+                            output_dir=args.output,
+                            optim="adamw_8bit",
+                            report_to="none",
+                            remove_unused_columns=False,  # Important for custom formatting
+                        ),
+                        formatting_func=lambda x: x["text"],
+                    )
+                    logger.info("Using SFTTrainer with formatting_func")
+                else:
+                    raise e
         except ImportError:
             # If SFTTrainer is not available, use regular Trainer with a data collator
             logger.info("SFTTrainer not available, using regular Trainer")
