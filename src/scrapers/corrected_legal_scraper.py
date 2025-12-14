@@ -162,7 +162,17 @@ def slice_html_by_anchor_range(html: str, start_anchor: str, end_anchor: str) ->
 # -----------------------------
 
 def clean_text(s: str) -> str:
-    return re.sub(r"\s+", " ", s.strip())
+    # Удаляем HTML id атрибуты в начале строки
+    s = re.sub(r'^id="[^"]*"\s*', '', s)
+    # Удаляем символ ">" в начале строки, который может оставаться после обработки HTML
+    s = re.sub(r'^>\s*', '', s)
+    # Заменяем неразрывные пробелы и другие специальные символы
+    s = s.replace("\xa0", " ")
+    # Заменяем множественные пробелы и табуляции на одиночный пробел
+    s = re.sub(r"[ \t]+", " ", s)
+    # Заменяем множественные переносы строк на максимум 2
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
 
 def extract_article_number(title: str) -> Optional[str]:
     if not title:
@@ -333,9 +343,15 @@ def unescape_minimal(s: str) -> str:
 def html_fragment_to_text(fragment_html_escaped: str) -> str:
     html = unescape_minimal(fragment_html_escaped)
     soup = BeautifulSoup(html, "html.parser")
-
+    
+    # Получаем текст, сохраняя структуру
+    text = soup.get_text("\n", strip=False)
+    
+    # Удаляем id="..." из начала текста
+    text = re.sub(r'^id="[^"]*"\s*', '', text)
+    
     parts = []
-    for line in soup.get_text("\n", strip=True).splitlines():
+    for line in text.splitlines():
         t = clean_text(line)
         if not t or t in STOP_LINES:
             continue
@@ -421,9 +437,16 @@ def scrape_actual_code_pairs(code: str, target: int) -> List[Dict]:
 
             gc = api_getcontent(redid)
             nodes = iter_article_nodes_from_getcontent(gc)
+            if not nodes:
+                logger.warning(f"[{code.upper()}] no article nodes for hash={doc_hash}, redid={redid}")
+                continue
+                
             logger.info(f"[{code.upper()}] {doc_title[:60]} | redid={redid} | articles={len(nodes)}")
 
             rt = api_redtext_content(redid, ttl=1)
+            if not rt:
+                logger.warning(f"[{code.upper()}] no redtext content for hash={doc_hash}, redid={redid}")
+                continue
 
             for node in nodes:
                 if len(article_records) >= target * 3:  # safety buffer
