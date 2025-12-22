@@ -1,0 +1,44 @@
+{
+  "base_url": "http://pravo.gov.ru/codex/",
+  "target_articles_per_code": 240,
+  "min_content_length": 50,
+  "output_dir": "data/raw",
+  "codes": {
+    "gk": {
+      "name": "Гражданский кодекс",
+      "selector": "body > div.wrapper > div.content-container > div.container.mb-md-30 > div:nth-child(2)",
+      "code": "gk"
+    },
+    "nk": {
+      "name": "Налоговый кодекс",
+      "selector": "body > div.wrapper > div.content-container > div.container.mb-md-30 > div:nth-child(3)",
+      "code": "nk"
+    },
+    "tk": {
+      "name": "Трудовой кодекс",
+      "selector": "body > div.wrapper > div.content-container > div.container.mb-md-30 > div:nth-child(4)",
+      "code": "tk"
+    },
+    "koap": {
+      "name": "Кодекс об административных правонарушениях",
+      "selector": "body > div.wrapper > div.content-container > div.container.mb-md-30 > div:nth-child(5)",
+      "code": "koap"
+    },
+    "apk": {
+      "name": "Арбитражный процессуальный кодекс",
+      "selector": "body > div.wrapper > div.content-container > div.container.mb-md-30 > div:nth-child(9)",
+      "code": "apk"
+    }
+  },
+  "scraper": {
+    "headless": true,
+    "timeout": 30000,
+    "wait_after_navigation": 1000,
+    "retry_attempts": 3,
+    "delay_between_requests": {
+      "min": 0.5,
+      "max": 1.5
+    }
+  }
+}
+
