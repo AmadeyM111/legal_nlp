@@ -53,6 +53,9 @@ class PravoScraperV2:
         """Получает hash кодекса из индекса pravo.gov.ru/codex/"""
         logger.info(f"Получаем hash для кодекса {code_key}")
         
+        # Увеличиваем таймаут для индекса (может загружаться медленно)
+        index_timeout = max(self.scraper_config["timeout"], 60000)  # Минимум 60 секунд
+        
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=self.scraper_config["headless"])
             context = browser.new_context(
@@ -61,7 +64,21 @@ class PravoScraperV2:
             page = context.new_page()
             
             try:
-                page.goto(self.codex_index_url, wait_until="networkidle", timeout=self.scraper_config["timeout"])
+                # Пробуем загрузить страницу с разными стратегиями ожидания
+                try:
+                    logger.info(f"Загружаем индекс (таймаут: {index_timeout}ms)...")
+                    page.goto(self.codex_index_url, wait_until="networkidle", timeout=index_timeout)
+                except PlaywrightTimeoutError:
+                    logger.warning("Network idle timeout, используем domcontentloaded")
+                    try:
+                        page.goto(self.codex_index_url, wait_until="domcontentloaded", timeout=index_timeout)
+                    except PlaywrightTimeoutError:
+                        logger.warning("DOMContentLoaded timeout, используем load")
+                        page.goto(self.codex_index_url, wait_until="load", timeout=index_timeout)
+                
+                # Дополнительное время для загрузки динамического контента
+                import time
+                time.sleep(3)  # Увеличено с 2 до 3 секунд
                 
                 # Ищем ссылку на кодекс
                 code_config = self.codes_config[code_key]
