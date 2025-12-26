@@ -11,6 +11,8 @@ chroma_legal_db/
 *.pdf
 *.docx
 *.jsonl
+# Исключение для тестовых данных в tests/
+!tests/**/*.jsonl
 
 # Exceptions — small samples and eval files (must be committed)
 !data/sample/
@@ -57,7 +59,9 @@ logs/
 Thumbs.db
 
 # ── Test / debug scripts ───────────────────────
+# Исключаем тестовые скрипты в корне, но НЕ в tests/ директории
 test*.py
+!tests/test_*.py
 debug*.py
 tmp*/
 temp*/
