@@ -1,35 +1,44 @@
 import os
 import json
+import logging
 import chromadb
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%H:%M:%S"
+)
+logger = logging.getLogger(__name__)
 
 def build_vector_db(articles_path="data/processed/articles_cleaned.json", db_path="./chroma_legal_db"):
     """
     Builds ChromaDB vector store from cleaned articles.
     """
-    print("Загрузка эмбеддера (multilingual-e5-large-instruct)...")
+    logger.info("Загрузка эмбеддера (multilingual-e5-large-instruct)...")
     embedder = SentenceTransformer("intfloat/multilingual-e5-large-instruct")
     
-    print(f"Загрузка статей из {articles_path}...")
+    logger.info(f"Загрузка статей из {articles_path}...")
     with open(articles_path, 'r', encoding='utf-8') as f:
         articles = json.load(f)
     
-    print(f"Создание ChromaDB в {db_path}...")
+    logger.info(f"Создание ChromaDB в {db_path}...")
     client = chromadb.PersistentClient(path=db_path)
     
     # Удаляем старую коллекцию если есть
     try:
         client.delete_collection(name="russian_law")
-    except:
-        pass
+    except Exception as e:
+        logger.debug(f"Коллекция не существовала или ошибка удаления: {e}")
     
     collection = client.create_collection(
         name="russian_law",
         metadata={"description": "Russian legal articles with embeddings"}
     )
     
-    print("Подготовка чанков и эмбеддингов...")
+    logger.info("Подготовка чанков и эмбеддингов...")
     documents = []
     metadatas = []
     ids = []
@@ -84,7 +93,7 @@ def build_vector_db(articles_path="data/processed/articles_cleaned.json", db_pat
             embeddings.append(embedding.tolist())
             chunk_id += 1
     
-    print(f"Добавление {len(documents)} чанков в ChromaDB...")
+    logger.info(f"Добавление {len(documents)} чанков в ChromaDB...")
     # Добавляем батчами по 100 (ChromaDB может глючить на больших батчах)
     batch_size = 100
     for i in range(0, len(documents), batch_size):
@@ -95,9 +104,9 @@ def build_vector_db(articles_path="data/processed/articles_cleaned.json", db_pat
             metadatas=metadatas[i:batch_end],
             ids=ids[i:batch_end]
         )
-        print(f"  Добавлено {batch_end}/{len(documents)} чанков")
+        logger.info(f"  Добавлено {batch_end}/{len(documents)} чанков")
     
-    print(f"✅ Готово! Сохранено {len(documents)} чанков в {db_path}")
+    logger.info(f"✅ Готово! Сохранено {len(documents)} чанков в {db_path}")
     return client, collection
 
 def search_legal_context(query: str, db_path="./chroma_legal_db", top_k=5):
@@ -139,12 +148,12 @@ if __name__ == "__main__":
     if args.build:
         build_vector_db(args.articles, args.db_path)
     elif args.query:
-        print(f"\nВопрос: {args.query}\n")
+        logger.info(f"\nВопрос: {args.query}\n")
         results = search_legal_context(args.query, args.db_path)
         for i, result in enumerate(results, 1):
-            print(f"{i}. {result['article_title']}")
-            print(f"   Код: {result['legal_code']}")
-            print(f"   Текст: {result['text'][:200]}...")
-            print()
+            logger.info(f"{i}. {result['article_title']}")
+            logger.info(f"   Код: {result['legal_code']}")
+            logger.info(f"   Текст: {result['text'][:200]}...")
+            logger.info("")
     else:
-        print("Usage: python src/rag_system.py --build  OR  python src/rag_system.py --query 'ваш вопрос'")
+        logger.info("Usage: python src/rag_system.py --build  OR  python src/rag_system.py --query 'ваш вопрос'")

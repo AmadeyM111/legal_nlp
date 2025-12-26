@@ -24,6 +24,8 @@ dependencies = [
     "huggingface_hub",
     "tqdm",
     "torch>=2.3",
+    "pymorphy2", 
+    "nltk"
 ]
 
 [project.optional-dependencies]
